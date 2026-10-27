@@ -1,0 +1,317 @@
+name: autograde
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  autograde:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+
+      - name: Install test deps
+        run: |
+          npm init -y >/dev/null 2>&1 || true
+          npm install --save-dev jest@29 jsdom@21 jest-environment-jsdom@29
+
+      - name: Write jest setup
+        run: |
+          cat > jest.setup.cjs <<'EOF'
+          const { TextEncoder, TextDecoder } = require('util');
+          if (typeof global.TextEncoder === 'undefined') global.TextEncoder = TextEncoder;
+          if (typeof global.TextDecoder === 'undefined') global.TextDecoder = TextDecoder;
+          EOF
+
+      - name: Write jest config
+        run: |
+          cat > jest.config.cjs <<'EOF'
+          module.exports = {
+            testEnvironment: 'jsdom',
+            setupFiles: ['<rootDir>/jest.setup.cjs'],
+            testMatch: ['**/__tests__/**/*.test.cjs'],
+            testTimeout: 15000
+          };
+          EOF
+
+      - name: Write tests
+        run: |
+          mkdir -p __tests__
+          cat > __tests__/forms.test.cjs <<'TESTEOF'
+          const fs = require('fs');
+          const path = require('path');
+          const { JSDOM, VirtualConsole } = require('jsdom');
+
+          const wait = function(ms) { return new Promise(function(r) { setTimeout(r, ms || 50); }); };
+          var source = '';
+          try { source = fs.readFileSync(path.resolve('script.js'), 'utf8'); } catch(e) {}
+
+          function byId(doc, id) { return doc.getElementById(id); }
+          function text(doc, id) {
+            var el = byId(doc, id);
+            return (el && (el.textContent || el.innerText) || '').trim();
+          }
+          function setVal(doc, id, v) {
+            var el = byId(doc, id);
+            if (!el) return;
+            el.value = String(v);
+          }
+          function click(doc, id) {
+            var el = byId(doc, id);
+            if (el) el.click();
+          }
+
+          async function loadDOM() {
+            var idx = 'index.html';
+            if (!fs.existsSync(idx)) throw new Error('index.html not found');
+            var vconsole = new VirtualConsole();
+            vconsole.on('error', function() {});
+            var baseDir = path.dirname(path.resolve(idx));
+            var baseUrl = 'file://' + baseDir.replace(/\\+/g, '/') + '/';
+            var dom = await JSDOM.fromFile(idx, {
+              url: baseUrl,
+              runScripts: 'dangerously',
+              resources: 'usable',
+              pretendToBeVisual: true,
+              virtualConsole: vconsole
+            });
+            dom.window.alert = function() {};
+            dom.window.prompt = function() { return ''; };
+            await new Promise(function(res) {
+              dom.window.addEventListener('load', res, { once: true });
+            });
+            await wait();
+            return dom;
+          }
+
+          // script.js with its comment lines removed. The STEP comments name the
+          // very things these checks look for, so a check of the whole file would
+          // pass on untouched starter code.
+          function codeLines() {
+            return source.split('\n')
+              .map(function(line) { return line.trim(); })
+              .filter(function(line) { return !line.startsWith('//') && !line.startsWith('*'); })
+              .join('\n');
+          }
+
+          describe('Unit 8.7 – Forms & Event Listeners', function() {
+            var dom, window, document;
+            // A fresh page for every test. Each graded step runs ONE test on
+            // its own page, so a shared page let the summary pass Clear only
+            // because Calculate had been clicked first.
+            beforeEach(async function() {
+              dom = await loadDOM();
+              window = dom.window;
+              document = window.document;
+            });
+            afterEach(function() { if (dom) dom.window.close(); });
+
+            test('shout warm up', async function() {
+              setVal(document, 'shoutInput', 'hello');
+              click(document, 'btnShout');
+              await wait();
+              expect(text(document, 'outShout')).toBe('HELLO!');
+            });
+
+            test('no onclick in HTML', function() {
+              var btns = ['btnCalc', 'clearBtn', 'btnShout'];
+              for (var i = 0; i < btns.length; i++) {
+                var btn = byId(document, btns[i]);
+                expect(btn).not.toBeNull();
+                expect(btn.getAttribute('onclick')).toBeNull();
+              }
+            });
+
+            test('uses addEventListener', function() {
+              expect(codeLines()).toMatch(/addEventListener\s*\(/);
+            });
+
+            test('required elements exist', function() {
+              var ids = ['myInput', 'serviceSelect', 'btnCalc', 'clearBtn', 'myPara',
+                'btnShout', 'shoutInput', 'outShout'];
+              for (var i = 0; i < ids.length; i++) {
+                expect(byId(document, ids[i])).not.toBeNull();
+              }
+              var radios = document.getElementsByName('rg');
+              expect(radios.length).toBeGreaterThanOrEqual(4);
+              var checkboxes = document.getElementsByName('cb');
+              expect(checkboxes.length).toBeGreaterThanOrEqual(8);
+            });
+
+            test('large plus 2 toppings dine in', async function() {
+              // Large is default (r3 checked), select 2 toppings
+              byId(document, 'cb1').checked = true;
+              byId(document, 'cb2').checked = true;
+              byId(document, 'serviceSelect').value = 'dinein';
+              setVal(document, 'myInput', 'Test');
+              click(document, 'btnCalc');
+              await wait();
+              var output = text(document, 'myPara');
+              expect(output).toMatch(/13\.50/);
+            });
+
+            test('small no toppings delivery', async function() {
+              // Uncheck all toppings first
+              var cbs = document.getElementsByName('cb');
+              for (var i = 0; i < cbs.length; i++) { cbs[i].checked = false; }
+              // Select small
+              byId(document, 'r1').checked = true;
+              byId(document, 'serviceSelect').value = 'delivery';
+              setVal(document, 'myInput', 'Test');
+              click(document, 'btnCalc');
+              await wait();
+              var output = text(document, 'myPara');
+              expect(output).toMatch(/10\.50/);
+            });
+
+            test('clear resets form', async function() {
+              // Set some values first
+              setVal(document, 'myInput', 'Alice');
+              byId(document, 'r1').checked = true;
+              byId(document, 'cb1').checked = true;
+              byId(document, 'cb2').checked = true;
+              byId(document, 'serviceSelect').value = 'delivery';
+              byId(document, 'myPara').textContent = 'something';
+
+              click(document, 'clearBtn');
+              await wait();
+
+              // Check all reset
+              expect(byId(document, 'myInput').value).toBe('');
+              expect(byId(document, 'r3').checked).toBe(true);
+              var cbs = document.getElementsByName('cb');
+              for (var i = 0; i < cbs.length; i++) {
+                expect(cbs[i].checked).toBe(false);
+              }
+              expect(byId(document, 'serviceSelect').value).toBe('dinein');
+              expect(text(document, 'myPara')).toBe('');
+            });
+          });
+          TESTEOF
+
+      # === Graded steps (sum to 100) ===
+      - id: t_shout
+        name: shout warm up
+        uses: cs-plus-plus/autograding-command-grader@v1
+        with:
+          test-name: shout warm up
+          setup-command: echo "ready"
+          command: npx jest --runInBand --testNamePattern "shout warm up$"
+          timeout: 60
+          max-score: 15
+
+      - id: t_no_onclick
+        name: no onclick in HTML
+        uses: cs-plus-plus/autograding-command-grader@v1
+        with:
+          test-name: no onclick in HTML
+          setup-command: echo "ready"
+          command: npx jest --runInBand --testNamePattern "no onclick in HTML$"
+          timeout: 60
+          max-score: 10
+
+      - id: t_addeventlistener
+        name: uses addEventListener
+        uses: cs-plus-plus/autograding-command-grader@v1
+        with:
+          test-name: uses addEventListener
+          setup-command: echo "ready"
+          command: npx jest --runInBand --testNamePattern "uses addEventListener$"
+          timeout: 60
+          max-score: 5
+
+      - id: t_elements
+        name: required elements exist
+        uses: cs-plus-plus/autograding-command-grader@v1
+        with:
+          test-name: required elements exist
+          setup-command: echo "ready"
+          command: npx jest --runInBand --testNamePattern "required elements exist$"
+          timeout: 60
+          max-score: 10
+
+      - id: t_large_2
+        name: large plus 2 toppings dine in
+        uses: cs-plus-plus/autograding-command-grader@v1
+        with:
+          test-name: large plus 2 toppings dine in
+          setup-command: echo "ready"
+          command: npx jest --runInBand --testNamePattern "large plus 2 toppings dine in$"
+          timeout: 60
+          max-score: 20
+
+      - id: t_small_delivery
+        name: small no toppings delivery
+        uses: cs-plus-plus/autograding-command-grader@v1
+        with:
+          test-name: small no toppings delivery
+          setup-command: echo "ready"
+          command: npx jest --runInBand --testNamePattern "small no toppings delivery$"
+          timeout: 60
+          max-score: 20
+
+      - id: t_clear
+        name: clear resets form
+        uses: cs-plus-plus/autograding-command-grader@v1
+        with:
+          test-name: clear resets form
+          setup-command: echo "ready"
+          command: npx jest --runInBand --testNamePattern "clear resets form$"
+          timeout: 60
+          max-score: 20
+
+      # Summary
+      - name: Build summary
+        shell: bash
+        run: |
+          npx jest --runInBand --json --outputFile=jest-summary.json || true
+          node - <<'NODE'
+          const fs = require("fs");
+          let jr = {};
+          try { jr = JSON.parse(fs.readFileSync("jest-summary.json","utf8")); } catch {}
+          const assertions = (jr.testResults||[]).flatMap(t => t.assertionResults || []);
+          const tests = [
+            { name: "shout warm up", pts: 15 },
+            { name: "no onclick in HTML", pts: 10 },
+            { name: "uses addEventListener", pts: 5 },
+            { name: "required elements exist", pts: 10 },
+            { name: "large plus 2 toppings dine in", pts: 20 },
+            { name: "small no toppings delivery", pts: 20 },
+            { name: "clear resets form", pts: 20 },
+          ];
+          let earned = 0;
+          const lines = ["# Unit 8.7 Autograder Summary", ""];
+          for (const t of tests) {
+            const a = assertions.find(x => x.title === t.name);
+            const passed = !!a && a.status === "passed";
+            if (passed) earned += t.pts;
+            lines.push((passed ? "✅" : "❌") + " " + t.name + " (" + t.pts + " pts)");
+          }
+          lines.push("", "**Score: " + earned + "/100**");
+          console.log(lines.join("\n"));
+          if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
+          NODE
+
+      - name: Prepare reporter env
+        shell: bash
+        run: |
+          echo "T_SHOUT_RESULTS=${{ steps.t_shout.outputs.result }}"                     >> "$GITHUB_ENV"
+          echo "T_NO_ONCLICK_RESULTS=${{ steps.t_no_onclick.outputs.result }}"           >> "$GITHUB_ENV"
+          echo "T_ADDEVENTLISTENER_RESULTS=${{ steps.t_addeventlistener.outputs.result }}" >> "$GITHUB_ENV"
+          echo "T_ELEMENTS_RESULTS=${{ steps.t_elements.outputs.result }}"               >> "$GITHUB_ENV"
+          echo "T_LARGE_2_RESULTS=${{ steps.t_large_2.outputs.result }}"                 >> "$GITHUB_ENV"
+          echo "T_SMALL_DELIVERY_RESULTS=${{ steps.t_small_delivery.outputs.result }}"   >> "$GITHUB_ENV"
+          echo "T_CLEAR_RESULTS=${{ steps.t_clear.outputs.result }}"                     >> "$GITHUB_ENV"
+
+      - name: Report grades
+        uses: cs-plus-plus/autograding-grading-reporter@v1
+        with:
+          runners: 't_shout,t_no_onclick,t_addeventlistener,t_elements,t_large_2,t_small_delivery,t_clear'
+          token: ${{ github.token }}
